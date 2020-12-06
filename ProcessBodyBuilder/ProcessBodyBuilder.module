@@ -1,0 +1,389 @@
+<?php
+
+
+namespace ProcessWire;
+
+include_once __DIR__ . "/twig/vendor/autoload.php";
+include_once __DIR__ . "/ProcessBodyRenderHelper.php";
+include_once __DIR__ . "/TwigExtensions.php";
+
+class ProcessBodyBuilder extends Process
+{
+    const modularName = "process_body_builder";
+    static $moduleFields = array(
+        "process_body_builder_code",
+        "process_body_builder_type",
+        "process_body_builder"
+    );
+    static $moduleTemplates = array(
+        "process_body_builder",
+        "repeater_process_body_builder"
+    );
+
+
+    private $fieldIdsInBuilder = null;
+
+    /** @var \Twig\Environment $twig */
+    private $twig;
+
+
+    public static function getModuleInfo()
+    {
+        return array(
+            'title' => 'Body Builder',
+            'summary' => 'A builder for a more adjustable yet clear outputting of body elements',
+            'version' => 1,
+            'useNavJSON' => true,
+            'requires' => ['InputfieldAceExtended', 'FieldtypeRepeater'],
+            'installs' => ['InputfieldAceExtended', 'FieldtypeRepeater'],
+            'autoload' => true
+        );
+    }
+
+    public function init()
+    {
+        $this->fieldIdsInBuilder = $this->fields->get(self::modularName)->repeaterFields;
+        $this->moduleInfo = self::getModuleInfo();
+        $process = $this->wire('process');
+        if ("$process" === "$this") {
+            $this->headline($this->moduleInfo['page']['title']);
+        }
+        $this->addHookAfter("Fields::save", $this, 'hookWhenFieldSaved');
+        $this->addHookAfter("Field::getInputfield", $this, 'hookHideTitle');
+        $this->addHookAfter('Page::renderField', $this, 'hookRenderField');
+
+        $this->twig = new \Twig\Environment(new \Twig\Loader\ArrayLoader(), [
+            'autoescape' => false,
+            'debug' => $this->config->debug
+        ]);
+        $this->twig->addExtension(new \Twig\Extension\DebugExtension());
+        return parent::init();
+    }
+
+
+
+    public function hookRenderField(HookEvent $event)
+    {
+        /** @var Page $page */
+        $page = $event->object;
+        if (!$page->hasField(self::modularName)) return;
+        $page->of(false);
+        $event->return = $this->renderValue($page, self::modularName, $page);
+    }
+
+    /**
+     * @param Page|null $page
+     * @param String|null $fieldName
+     * @return string
+     * @return array
+     * @throws \Twig\Error\LoaderError
+     * @throws \Twig\Error\SyntaxError
+     */
+    private function renderValue($page = null, String $fieldName = null)
+    {
+        if ($page === null && $fieldName === null) return "";
+        $returnOutput = [];
+        $pageFieldValue = $page->get($fieldName);
+        if ($pageFieldValue != null && is_object($pageFieldValue)) {
+            //This is only for process body builder repeaters.
+            if ($pageFieldValue instanceof RepeaterPageArray && $fieldName == self::modularName) {
+                foreach ($pageFieldValue as $item) {
+                    /** @var Page $item */
+                    $returnAsHTML = false;
+                    $templateString = null;
+                    //Get the template page
+                    $templatePage = $item->get(self::modularName . '_type');
+                    $fieldId = (int)str_replace('for-body-builder-', '', $templatePage->name);
+                    $field = $item->getField($fieldId);
+
+                    if (!($templatePage instanceof NullPage)) {
+                        $templateString = $templatePage->get('process_body_builder_code');
+                        if (!empty($templateString)) $returnAsHTML = true;
+                    }
+                    if ($this->config->debug && $returnAsHTML) {
+                        $templateString = '<!-- BODY BUILDER TEMPLATE START ' . $field->name . ' -->' .
+                            '<!-- {{ dump(field) }} -->' .
+                            "\n\n$templateString\n\n" .
+                            '<!-- ' . $field->name . ' END -->';
+                    }
+
+                    $returnOutput[] = $this->twig->createTemplate($templateString)->render([
+                        "field" => $this->renderValue($item, $field->name)
+                    ]);
+                }
+                return "\n" . join("\n\n", $returnOutput);
+            }
+
+            if ($page instanceof RepeaterPage && strpos($page->name, FieldtypeRepeater::repeaterPageNamePrefix) === false) {
+                $repeaterField = $page->template->fieldgroup->get($fieldName);
+                $repPage = $page->get($fieldName);
+                foreach ($repeaterField->repeaterFields as $fieldId) {
+                    $field = $this->fields->get($fieldId);
+                    $returnOutput[$field->name] = $this->renderValue($repPage, $field->name);
+                }
+                return $returnOutput;
+            }
+
+            if ($page instanceof RepeaterPage && strpos($page->name, FieldtypeRepeater::repeaterPageNamePrefix) !== false) {
+                $f = $page->getField($fieldName);
+                $ft = $f->getFieldtype();
+
+                if ($ft->hasHook('formatValue')) {
+                    return $ft->runHooks('formatValue', $page, $f, $page->get($fieldName));
+                }
+                return $page->get($fieldName);
+            }
+
+            return $page->renderValue($fieldName);
+        } else {
+            return $pageFieldValue;
+        }
+    }
+
+    public function hookHideTitle(HookEvent $event) {
+        if ($this->page->process !== 'ProcessPageEdit') return;
+        /** @var Field $field */
+        $field = $event->object;
+        /** @var Inputfield $inputfield */
+        $inputfield = $event->return;
+        $page = $event->arguments(0);
+        if ($page->template == self::modularName && $field->name == 'title') {
+            $inputfield->collapsed = Inputfield::collapsedHidden;
+        }
+    }
+
+    public function hookWhenFieldSaved(HookEvent $event)
+    {
+        /** @var RepeaterField $field */
+        $field = $event->arguments(0);
+
+        if ($field->name === self::modularName) {
+            $rootPage = $this->pages->get($this->config->adminRootPageID)->child('name=setup')->child('name=' . self::modularName);
+            $template = $this->templates->get('repeater_' . self::modularName);
+
+            //Simple we just check if it exists a page for each field below Body Builder, if not create one
+
+            foreach ($field->repeaterFields as $repeaterField) {
+                /** @var Field $fieldSource */
+                $fieldSource = $this->wire('fields')->get($repeaterField);
+
+                if ($fieldSource instanceof Field && $fieldSource->name !== self::modularName . '_type') {
+
+
+                    $templatePage = $this->wire('pages')->get("parent=$rootPage,name=for-body-builder-{$fieldSource->id}");
+
+                    if ($templatePage instanceof NullPage) {
+                        $templatePage = new Page();
+                        $templatePage->name = "for-body-builder-{$fieldSource->id}";
+                        $templatePage->parent = $rootPage;
+                        $templatePage->template = self::modularName;
+                        $templatePage->title = $fieldSource->label ?? "Template for {$fieldSource->name}";
+                        $templatePage->save();
+                    }
+                    $template->fieldgroup->setFieldContextArray($fieldSource->id, ['showIf' => self::modularName . "_type={$templatePage->id}"]);
+                    $template->fieldgroup->saveContext();
+
+                }
+            }
+
+        }
+
+    }
+
+
+    /**
+     * Output JSON list of navigation items for this (intended to for ajax use)
+     *
+     * @param array $options
+     * @return array|string
+     *
+     */
+    public function ___executeNavJSON(array $options = array())
+    {
+        $pages = $this->wire('pages')->find('template=' . self::modularName);
+
+        $options['items'] = $pages;
+        $options['itemLabel'] = 'title';
+
+        return parent::___executeNavJSON($options);
+    }
+
+    public function ___execute()
+    {
+        $this->headline("Body Builder Templates");
+        return "Here the list of templates will be and the possibility to add new ones";
+    }
+
+    public function ___install()
+    {
+        try {
+            $p = new Page();
+            $p->template = $this->templates->get("admin");
+            $p->name = self::modularName;
+            $p->parent = $this->pages->get($this->config->adminRootPageID)->child('name=setup');
+            $p->process = $this;
+            $p->title = 'Body Builder Templates';
+            $p->save();
+
+            $typeField = new Field();
+            $typeField->type = $this->modules->get('FieldtypePage');
+            $typeField->name = self::modularName . '_type';
+            $typeField->label = _("Content type");
+            $typeField->derefAsPage = 1;
+            $typeField->inputfield = "InputfieldSelect";
+            $typeField->parent_id = $p->id;
+            $typeField->save();
+
+            $this->_createRepeater(self::modularName, self::modularName . '_type', "Body Builder", self::modularName);
+
+
+            $field = new Field();
+            $field->type = $this->modules->get("FieldtypeTextarea");
+            $field->inputfieldClass = 'InputfieldAceExtended';
+            $field->mode = ["twig"];
+            $field->modes = ["php", "html", "twig", "css", "js"];
+            $field->rows = 40;
+            $field->label = "Code";
+            $field->name = self::modularName . "_code";
+            $field->collapsed = Inputfield::collapsedNever;
+            $field->save();
+
+
+            $fieldGroup = new Fieldgroup();
+            $fieldGroup->name = self::modularName;
+            $fieldGroup->add($this->fields->get('title'));
+            $fieldGroup->add($field);
+
+            $fieldGroup->save();
+
+            //Add a corresponding connection to a field one-to-one
+            $template = $this->wire('templates')->get('name=' . self::modularName);
+            if (!$template->id) {
+                $template = new Template();
+                $template->name = self::modularName;
+                $template->flags = Template::flagSystem;
+                $template->parentTemplates(array('admin', self::modularName));
+                $template->noMove = 1;
+                $template->noChangeTemplate = 1;
+                $template->label = "Body Builder Templates";
+                $template->fieldgroup = $fieldGroup;
+                $template->save();
+                $template->childTemplates(array(self::modularName));
+                $template->save();
+            }
+        } catch (\Exception $e) {
+            $this->uninstall();
+            $this->install();
+        }
+
+
+    }
+
+    public function ___uninstall()
+    {
+        $page = $this->wire('pages')->get("name=" . self::modularName . ",parent=" . $this->pages->get($this->config->adminRootPageID)->child('name=setup'));
+        if (!($page instanceof NullPage)) {
+            $this->wire('pages')->delete($page, true);
+        }
+
+        $pagesToDelete = $this->wire('pages')->find("name=repeater_" . self::modularName);
+        foreach ($pagesToDelete as $page) {
+            if (!($page instanceof NullPage)) {
+                $this->wire('pages')->delete($page, true);
+            }
+        }
+
+        foreach (self::$moduleTemplates as $templateName) {
+            $template = $this->wire('templates')->get($templateName);
+            if (@$template->id) {
+                $template->flags = Template::flagSystemOverride;
+                $template->flags = 0;
+                $template->save();
+
+                foreach ($template->fieldgroup as $field) {
+                    $reInitiatFlag = false;
+                    /** @var Field $field */
+                    if ($field->hasFlag(Field::flagGlobal)) {
+                        $field->removeFlag(Field::flagGlobal);
+                        $reInitiatFlag = true;
+                    }
+                    $template->fieldgroup->remove($field);
+                    $template->fieldgroup->save();
+                    if (strpos($field->name, self::modularName) !== false) {
+                        $this->wire('fields')->delete($field);
+                    }
+                    $field->addFlag(Field::flagGlobal);
+                }
+                $p = $this->pages->get("template=$template");
+                if (!($p instanceof NullPage)) {
+                    $p->delete(true);
+                }
+                $this->wire('templates')->delete($template);
+                $this->wire('fieldgroups')->delete($template->fieldgroup);
+            }
+        }
+
+        foreach (self::$moduleFields as $fieldNames) {
+            try {
+                if ($field = $this->wire('fields')->get($fieldNames))
+                    if ($field instanceof Field)
+                        $this->wire('fields')->delete($field);
+            } catch (\Exception $e) {
+
+            }
+
+        }
+    }
+
+    private function _createRepeater($repeaterName, $repeaterFields, $repeaterLabel, $repeaterTags)
+    {
+        $fieldsArray = explode(' ', $repeaterFields);
+
+        $f = new Field();
+        $f->type = $this->modules->get("FieldtypeRepeater");
+        $f->name = $repeaterName;
+        $f->label = $repeaterLabel;
+        $f->tags = $repeaterTags;
+        $f->repeaterReadyItems = 3;
+
+        //Create fieldgroup
+        $repeaterFg = new Fieldgroup();
+        $repeaterFg->name = "repeater_$repeaterName";
+
+        //Add fields to fieldgroup
+        foreach ($fieldsArray as $field) {
+            $repeaterFg->append($this->fields->get($field));
+        }
+
+        $repeaterFg->save();
+
+        //Create template
+        $repeaterT = new Template();
+        $repeaterT->name = "repeater_$repeaterName";
+        $repeaterT->flags = 8;
+        $repeaterT->noChildren = 1;
+        $repeaterT->noParents = 1;
+        $repeaterT->noGlobal = 1;
+        $repeaterT->slashUrls = 1;
+        $repeaterT->fieldgroup = $repeaterFg;
+
+        $repeaterT->save();
+
+        //Setup page for the repeater - Very important
+        $repeaterPage = "for-field-{$f->id}";
+        $f->parent_id = $this->pages->get("name=$repeaterPage")->id;
+        $f->template_id = $repeaterT->id;
+        $f->repeaterReadyItems = 3;
+
+        //Now, add the fields directly to the repeater field
+        foreach ($fieldsArray as $field) {
+            $f->repeaterFields = $this->fields->get($field);
+        }
+
+        $f->save();
+
+        return $f;
+    }
+
+
+}
