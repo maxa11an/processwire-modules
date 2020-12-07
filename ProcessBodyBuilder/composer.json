@@ -1,0 +1,16 @@
+{
+  "name": "maxa11an/processwire-body-builder",
+  "description": "Social login through HybridAuth, standard login, registration and user profile for your site",
+  "homepage": "https://github.com/maxa11an/processwire-modules",
+  "type": "pw-module",
+  "license": "GNU GPL v2",
+  "authors": [
+    {
+      "name": "Max Allan Niklasson",
+      "email": "hello@maxallan.dev"
+    }
+  ],
+  "require": {
+    "twig/twig": "^3.1"
+  }
+}

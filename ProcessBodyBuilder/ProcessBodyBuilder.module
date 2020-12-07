@@ -3,7 +3,7 @@
 
 namespace ProcessWire;
 
-include_once __DIR__ . "/twig/vendor/autoload.php";
+include_once __DIR__ . "/vendor/autoload.php";
 include_once __DIR__ . "/ProcessBodyRenderHelper.php";
 include_once __DIR__ . "/TwigExtensions.php";
 
